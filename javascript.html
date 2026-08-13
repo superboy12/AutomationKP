@@ -1,0 +1,409 @@
+<!-- javascript.html — Client-side JavaScript -->
+<script>
+// ─── STATE ────────────────────────────────────────────────────
+var state = {
+  employees     : [],
+  filteredEmps  : [],
+  year          : '',
+  processDate   : '',
+  generating    : false,
+  batchQueue    : [],
+  batchIndex    : 0,
+  batchMode     : 'skip',
+  batchResults  : { success: 0, error: 0, skip: 0 },
+  pendingGenNIP : null
+};
+
+var BATCH_SIZE = 10;
+
+// ─── INIT ─────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', function() {
+  loadDashboard();
+  bindEvents();
+});
+
+function bindEvents() {
+  // Search
+  document.getElementById('search-input').addEventListener('input', debounce(handleSearch, 350));
+
+  // Config update
+  document.getElementById('process-date-input').addEventListener('change', function() {
+    updateProcessDate(this.value);
+  });
+
+  // Generate All btn
+  document.getElementById('btn-generate-all').addEventListener('click', function() {
+    openGenerateAllModal();
+  });
+
+  // Modal confirm
+  document.getElementById('btn-modal-confirm').addEventListener('click', confirmModal);
+  document.getElementById('btn-modal-cancel').addEventListener('click',  closeModal);
+
+  // Click outside modal to close
+  document.getElementById('modal-overlay').addEventListener('click', function(e) {
+    if (e.target === this) closeModal();
+  });
+}
+
+// ─── LOAD DASHBOARD ───────────────────────────────────────────
+function loadDashboard(year) {
+  showLoadingOverlay(true);
+
+  google.script.run
+    .withSuccessHandler(function(data) {
+      showLoadingOverlay(false);
+      if (!data.success) { showToast(data.error, 'error'); return; }
+
+      state.employees   = data.employees || [];
+      state.filteredEmps = state.employees;
+      state.year        = data.year;
+      state.processDate = data.processDate;
+
+      renderConfig(data);
+      renderStats(data.stats);
+      renderTable(state.filteredEmps);
+    })
+    .withFailureHandler(function(err) {
+      showLoadingOverlay(false);
+      showToast('Gagal memuat dashboard: ' + err, 'error');
+    })
+    .apiGetDashboardData(year || '');
+}
+
+// ─── RENDER CONFIG ────────────────────────────────────────────
+function renderConfig(data) {
+  document.getElementById('process-date-input').value = data.processDate || '';
+  document.getElementById('year-badge').textContent   = data.year || '';
+  state.year        = data.year;
+  state.processDate = data.processDate;
+}
+
+// ─── RENDER STATS ─────────────────────────────────────────────
+function renderStats(stats) {
+  if (!stats) return;
+  document.getElementById('stat-total').textContent   = stats.total   || 0;
+  document.getElementById('stat-success').textContent = stats.success || 0;
+  document.getElementById('stat-error').textContent   = stats.error   || 0;
+  document.getElementById('stat-pending').textContent = (stats.belum + (stats.skipped||0)) || 0;
+}
+
+// ─── RENDER TABLE ─────────────────────────────────────────────
+function renderTable(employees) {
+  var tbody = document.getElementById('table-body');
+  tbody.innerHTML = '';
+
+  if (!employees || employees.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state">' +
+      '<div class="empty-state-icon">📋</div>' +
+      '<div class="empty-state-text">Tidak ada data pegawai ditemukan.</div>' +
+      '</div></td></tr>';
+    return;
+  }
+
+  employees.forEach(function(emp, idx) {
+    var statusBadge = getStatusBadge(emp.status);
+    var nipClean    = (emp.nip || '').replace(/\s+/g, '');
+
+    var docBtn = emp.googleDocUrl
+      ? '<a href="' + emp.googleDocUrl + '" target="_blank" class="btn btn-blue btn-sm" id="btn-doc-' + idx + '">📄 Docs</a>'
+      : '<button class="btn btn-blue btn-sm" disabled id="btn-doc-' + idx + '">📄 Docs</button>';
+
+    var docxBtn = emp.docxUrl
+      ? '<a href="' + emp.docxUrl + '" target="_blank" class="btn btn-success btn-sm" id="btn-docx-' + idx + '">⬇ DOCX</a>'
+      : '<button class="btn btn-success btn-sm" disabled id="btn-docx-' + idx + '">⬇ DOCX</button>';
+
+    var row = '<tr id="row-' + nipClean + '">' +
+      '<td class="td-no">' + (emp.no || (idx + 1)) + '</td>' +
+      '<td class="td-nip">' + escapeHtml(emp.nip || '') + '</td>' +
+      '<td class="td-nama">' +
+        '<div class="truncate" title="' + escapeHtml(emp.namaLengkap || '') + '">' + escapeHtml(emp.namaLengkap || '') + '</div>' +
+      '</td>' +
+      '<td class="td-jabatan">' +
+        '<div class="truncate" title="' + escapeHtml(emp.jabatan || '') + '">' + escapeHtml(emp.jabatan || '') + '</div>' +
+      '</td>' +
+      '<td>' +
+        '<span class="text-muted" style="font-size:11px;">Anak eligible: </span>' +
+        '<strong style="color:var(--gold-light)">' + (emp.eligibleAnak || 0) + '</strong>' +
+      '</td>' +
+      '<td>' + statusBadge + '</td>' +
+      '<td>' +
+        '<div class="action-group">' +
+          '<button class="btn btn-secondary btn-sm" onclick="openSingleGenModal(\'' + escapeAttr(emp.nip) + '\')" id="btn-gen-' + idx + '">⚡ Generate</button>' +
+          docBtn +
+          docxBtn +
+        '</div>' +
+      '</td>' +
+      '</tr>';
+
+    tbody.insertAdjacentHTML('beforeend', row);
+  });
+}
+
+// ─── STATUS BADGE ─────────────────────────────────────────────
+function getStatusBadge(status) {
+  switch((status || '').toUpperCase()) {
+    case 'SUCCESS': return '<span class="badge badge-success">✓ Selesai</span>';
+    case 'ERROR':   return '<span class="badge badge-error">✗ Error</span>';
+    case 'SKIPPED': return '<span class="badge badge-skip">↷ Skipped</span>';
+    default:        return '<span class="badge badge-none">— Belum</span>';
+  }
+}
+
+// ─── SEARCH ───────────────────────────────────────────────────
+function handleSearch(e) {
+  var q = e.target.value.trim().toLowerCase();
+
+  if (!q) {
+    state.filteredEmps = state.employees;
+    renderTable(state.filteredEmps);
+    return;
+  }
+
+  state.filteredEmps = state.employees.filter(function(emp) {
+    return (emp.nip && emp.nip.toLowerCase().indexOf(q) >= 0) ||
+           (emp.namaLengkap && emp.namaLengkap.toLowerCase().indexOf(q) >= 0);
+  });
+
+  renderTable(state.filteredEmps);
+}
+
+// ─── UPDATE PROCESS DATE ──────────────────────────────────────
+function updateProcessDate(dateStr) {
+  if (!dateStr) return;
+  showToast('Memperbarui tanggal proses...', 'info');
+
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (!res.success) { showToast(res.error, 'error'); return; }
+      state.year = res.year;
+      document.getElementById('year-badge').textContent = res.year;
+      showToast('Tanggal proses diperbarui: ' + res.processDate, 'success');
+      loadDashboard(res.year);
+    })
+    .withFailureHandler(function(err) { showToast('Gagal update tanggal: ' + err, 'error'); })
+    .apiUpdateProcessDate(dateStr);
+}
+
+// ─── SINGLE GENERATE MODAL ────────────────────────────────────
+function openSingleGenModal(nip) {
+  state.pendingGenNIP = nip;
+  document.getElementById('modal-title').textContent = 'Generate Dokumen';
+  document.getElementById('modal-desc').textContent  =
+    'Pilih mode generate untuk pegawai ini:';
+  document.getElementById('modal-overlay').classList.add('open');
+}
+
+// ─── GENERATE ALL MODAL ───────────────────────────────────────
+function openGenerateAllModal() {
+  state.pendingGenNIP = null;
+  document.getElementById('modal-title').textContent = 'Generate Semua Pegawai';
+  document.getElementById('modal-desc').textContent  =
+    'Pilih mode generate untuk ' + state.employees.length + ' pegawai:';
+  document.getElementById('modal-overlay').classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('open');
+  state.pendingGenNIP = null;
+}
+
+function confirmModal() {
+  var selectedMode = document.querySelector('input[name="gen-mode"]:checked');
+  var mode = selectedMode ? selectedMode.value : 'skip';
+  closeModal();
+
+  if (state.pendingGenNIP) {
+    // Generate satu pegawai
+    executeSingleGenerate(state.pendingGenNIP, mode);
+  } else {
+    // Generate semua
+    executeGenerateAll(mode);
+  }
+}
+
+// ─── SINGLE GENERATE ─────────────────────────────────────────
+function executeSingleGenerate(nip, mode) {
+  if (state.generating) { showToast('Proses generate sedang berjalan.', 'warning'); return; }
+
+  showToast('Memproses: ' + nip + '...', 'info');
+
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (!res.success) {
+        showToast('Error: ' + res.error, 'error');
+        addLogEntry('ERROR: ' + nip + ' — ' + res.error, 'error');
+      } else {
+        var msg = res.status === 'SKIPPED' ? 'Dokumen sudah ada (SKIP).' : 'Dokumen berhasil digenerate!';
+        showToast(msg, res.status === 'SKIPPED' ? 'info' : 'success');
+        addLogEntry((res.status === 'SKIPPED' ? 'SKIP' : 'OK') + ': ' + nip, res.status === 'SKIPPED' ? 'skip' : 'success');
+        // Reload row data
+        loadDashboard(state.year);
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast('Gagal: ' + err, 'error');
+      addLogEntry('ERROR: ' + nip, 'error');
+    })
+    .apiGenerateSingle(nip, mode);
+}
+
+// ─── GENERATE ALL (BATCH) ─────────────────────────────────────
+function executeGenerateAll(mode) {
+  if (state.generating) { showToast('Proses generate sedang berjalan.', 'warning'); return; }
+
+  // Ambil semua NIP
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (!res.success) { showToast(res.error, 'error'); return; }
+      state.batchQueue   = res.nips;
+      state.batchIndex   = 0;
+      state.batchMode    = mode;
+      state.batchResults = { success: 0, error: 0, skip: 0 };
+      state.generating   = true;
+
+      document.getElementById('btn-generate-all').disabled = true;
+      showProgressBar(true, 0, res.total);
+      clearLog();
+      addLogEntry('Mulai generate ' + res.total + ' pegawai (mode: ' + mode + ')...', 'info');
+
+      processNextBatch();
+    })
+    .withFailureHandler(function(err) { showToast(err, 'error'); })
+    .apiGetAllNIPs(state.year);
+}
+
+function processNextBatch() {
+  if (state.batchIndex >= state.batchQueue.length) {
+    // Selesai
+    finishGeneration();
+    return;
+  }
+
+  var end   = Math.min(state.batchIndex + BATCH_SIZE, state.batchQueue.length);
+  var batch = state.batchQueue.slice(state.batchIndex, end);
+
+  updateProgress(state.batchIndex, state.batchQueue.length);
+  addLogEntry('Proses batch ' + (state.batchIndex + 1) + '-' + end + ' dari ' + state.batchQueue.length + '...', 'info');
+
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (!res.success) {
+        addLogEntry('Batch error: ' + res.error, 'error');
+        state.batchResults.error += batch.length;
+      } else {
+        var data = res.data;
+        data.results.forEach(function(r) {
+          if (r.result.status === 'SUCCESS')  { state.batchResults.success++; addLogEntry('OK: ' + r.nip, 'success'); }
+          else if (r.result.status === 'SKIPPED') { state.batchResults.skip++;    addLogEntry('SKIP: ' + r.nip, 'skip'); }
+          else { state.batchResults.error++;   addLogEntry('ERR: ' + r.nip + ' — ' + r.result.error, 'error'); }
+        });
+      }
+
+      state.batchIndex = end;
+      updateProgress(state.batchIndex, state.batchQueue.length);
+
+      // Delay kecil agar UI refresh
+      setTimeout(processNextBatch, 200);
+    })
+    .withFailureHandler(function(err) {
+      addLogEntry('Batch gagal: ' + err, 'error');
+      state.batchIndex = end;
+      setTimeout(processNextBatch, 200);
+    })
+    .apiGenerateBatch(batch, state.year, state.batchMode);
+}
+
+function finishGeneration() {
+  state.generating = false;
+  document.getElementById('btn-generate-all').disabled = false;
+
+  updateProgress(state.batchQueue.length, state.batchQueue.length);
+
+  var msg = 'Selesai! ✓ ' + state.batchResults.success +
+            ' berhasil, ✗ ' + state.batchResults.error +
+            ' error, ↷ ' + state.batchResults.skip + ' skip.';
+  addLogEntry(msg, 'info');
+  showToast(msg, state.batchResults.error > 0 ? 'warning' : 'success');
+
+  // Reload dashboard
+  setTimeout(function() { loadDashboard(state.year); }, 1000);
+}
+
+// ─── PROGRESS BAR ─────────────────────────────────────────────
+function showProgressBar(visible, current, total) {
+  var el = document.getElementById('progress-container');
+  el.classList.toggle('visible', visible);
+  updateProgress(current, total);
+}
+
+function updateProgress(current, total) {
+  var pct = total > 0 ? Math.round((current / total) * 100) : 0;
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent  = 'Memproses...';
+  document.getElementById('progress-count').textContent = current + ' / ' + total + ' (' + pct + '%)';
+}
+
+// ─── LOG PANEL ────────────────────────────────────────────────
+function addLogEntry(text, type) {
+  var panel = document.getElementById('log-panel');
+  var entry = document.createElement('div');
+  entry.className = 'log-entry ' + (type || 'info');
+  entry.textContent = '[' + new Date().toLocaleTimeString('id-ID') + '] ' + text;
+  panel.appendChild(entry);
+  panel.scrollTop = panel.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log-panel').innerHTML = '';
+}
+
+// ─── LOADING OVERLAY ──────────────────────────────────────────
+function showLoadingOverlay(visible) {
+  document.getElementById('loading-overlay').classList.toggle('visible', visible);
+}
+
+// ─── TOAST ────────────────────────────────────────────────────
+function showToast(message, type) {
+  type = type || 'info';
+  var icons = { success: '✓', error: '✗', info: 'ℹ', warning: '⚠' };
+  var container = document.getElementById('toast-container');
+
+  var toast = document.createElement('div');
+  toast.className = 'toast ' + type;
+  toast.innerHTML = '<span>' + (icons[type] || '•') + '</span><span>' + escapeHtml(message) + '</span>';
+  container.appendChild(toast);
+
+  setTimeout(function() {
+    toast.style.opacity    = '0';
+    toast.style.transform  = 'translateY(8px)';
+    toast.style.transition = 'all 0.3s';
+    setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
+  }, 4000);
+}
+
+// ─── HELPERS ──────────────────────────────────────────────────
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.toString()
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+function escapeAttr(str) {
+  if (!str) return '';
+  return str.toString().replace(/'/g, "\\'");
+}
+
+function debounce(fn, delay) {
+  var timer;
+  return function() {
+    var args = arguments;
+    var ctx  = this;
+    clearTimeout(timer);
+    timer = setTimeout(function() { fn.apply(ctx, args); }, delay);
+  };
+}
+</script>

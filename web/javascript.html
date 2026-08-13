@@ -1,0 +1,668 @@
+<!-- javascript.html — Client-side JavaScript -->
+<script>
+// ─── STATE ────────────────────────────────────────────────────
+var state = {
+  employees     : [],
+  filteredEmps  : [],
+  year          : '',
+  processDate   : '',
+  generating    : false,
+  batchQueue    : [],
+  batchIndex    : 0,
+  batchMode     : 'skip',
+  batchResults  : { success: 0, error: 0, skip: 0 },
+  pendingGenNIP : null,
+  cancelRequested: false
+};
+
+var BATCH_SIZE = 2;
+
+// ─── INIT ─────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', function() {
+  loadDashboard();
+  bindEvents();
+});
+
+function bindEvents() {
+  // Search
+  document.getElementById('search-input').addEventListener('input', debounce(handleSearch, 350));
+
+  // Config update
+  document.getElementById('process-date-input').addEventListener('change', function() {
+    updateProcessDate(this.value);
+  });
+
+  // Generate All btn
+  document.getElementById('btn-generate-all').addEventListener('click', function() {
+    openGenerateAllModal();
+  });
+
+  // Modal confirm
+  document.getElementById('btn-modal-confirm').addEventListener('click', confirmModal);
+  document.getElementById('btn-modal-cancel').addEventListener('click',  closeModal);
+
+  // Batal btn
+  document.getElementById('btn-cancel-all').addEventListener('click', function() {
+    if (!state.generating) return;
+    if (state.cancelRequested) {
+      // Jika diklik dua kali (Force Stop)
+      if (confirm('PAKSA BERHENTI? (Ini akan mengabaikan sisa proses yang mungkin sedang berjalan)')) {
+        state.activeWorkers = 1; // Paksa jadi 1 agar runWorker berikutnya memanggil finishGeneration
+        state.currentIndex = state.queue.length; // Kosongkan antrean
+        runWorker('FORCE');
+      }
+      return;
+    }
+    if (!confirm('Batalkan proses generate massal? (Proses yang sedang berjalan akan diselesaikan lebih dulu)')) return;
+    state.cancelRequested = true;
+    addLogEntry('Meminta pembatalan... (menunggu worker selesai)', 'warning');
+    this.textContent = '🛑 Paksa Berhenti';
+  });
+
+  // Click outside modal to close
+  document.getElementById('modal-overlay').addEventListener('click', function(e) {
+    if (e.target === this) closeModal();
+  });
+}
+
+// ─── LOAD DASHBOARD ───────────────────────────────────────────
+function loadDashboard(year) {
+  showLoadingOverlay(true);
+
+  google.script.run
+    .withSuccessHandler(function(data) {
+      showLoadingOverlay(false);
+      if (!data.success) { showToast(data.error, 'error'); return; }
+
+      state.employees   = data.employees || [];
+      state.filteredEmps = state.employees;
+      state.year        = data.year;
+      state.processDate = data.processDate;
+
+      renderConfig(data);
+      renderStats(data.stats);
+      renderTable(state.filteredEmps);
+    })
+    .withFailureHandler(function(err) {
+      showLoadingOverlay(false);
+      showToast('Gagal memuat dashboard: ' + err, 'error');
+    })
+    .apiGetDashboardData(year || '');
+}
+
+// ─── RENDER CONFIG ────────────────────────────────────────────
+function renderConfig(data) {
+  document.getElementById('process-date-input').value = data.processDate || '';
+  document.getElementById('year-badge').textContent   = data.year || '';
+  state.year        = data.year;
+  state.processDate = data.processDate;
+}
+
+// ─── RENDER STATS ─────────────────────────────────────────────
+function renderStats(stats) {
+  if (!stats) return;
+  document.getElementById('stat-total').textContent   = stats.total   || 0;
+  document.getElementById('stat-success').textContent = stats.success || 0;
+  document.getElementById('stat-error').textContent   = stats.error   || 0;
+  document.getElementById('stat-pending').textContent = (stats.belum + (stats.skipped||0)) || 0;
+}
+
+// ─── RENDER TABLE ─────────────────────────────────────────────
+function renderTable(employees) {
+  var tbody = document.getElementById('table-body');
+  tbody.innerHTML = '';
+
+  if (!employees || employees.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state">' +
+      '<div class="empty-state-icon">📋</div>' +
+      '<div class="empty-state-text">Tidak ada data pegawai ditemukan.</div>' +
+      '</div></td></tr>';
+    return;
+  }
+
+  employees.forEach(function(emp, idx) {
+    var statusBadge = getStatusBadge(emp.status);
+    var nipClean    = (emp.nip || '').replace(/\s+/g, '');
+
+    var docBtn = emp.googleDocUrl
+      ? '<a href="' + emp.googleDocUrl + '" target="_blank" class="btn btn-blue btn-sm" id="btn-doc-' + idx + '">📄 Docs</a>'
+      : '<button class="btn btn-blue btn-sm" disabled id="btn-doc-' + idx + '">📄 Docs</button>';
+
+    var docxBtn = emp.docxUrl
+      ? '<a href="' + emp.docxUrl + '" target="_blank" class="btn btn-success btn-sm" id="btn-docx-' + idx + '">⬇ DOCX</a>'
+      : '<button class="btn btn-success btn-sm" disabled id="btn-docx-' + idx + '">⬇ DOCX</button>';
+
+    var row = '<tr id="row-' + nipClean + '">' +
+      '<td class="td-no">' + (emp.no || (idx + 1)) + '</td>' +
+      '<td class="td-nip">' + escapeHtml(emp.nip || '') + '</td>' +
+      '<td class="td-nama">' +
+        '<div class="truncate" title="' + escapeHtml(emp.namaLengkap || '') + '">' + escapeHtml(emp.namaLengkap || '') + '</div>' +
+      '</td>' +
+      '<td class="td-jabatan">' +
+        '<div class="truncate" title="' + escapeHtml(emp.jabatan || '') + '">' + escapeHtml(emp.jabatan || '') + '</div>' +
+      '</td>' +
+      '<td>' +
+        '<span class="text-muted" style="font-size:11px;">Anak eligible: </span>' +
+        '<strong style="color:var(--gold-light)">' + (emp.eligibleAnak || 0) + '</strong>' +
+      '</td>' +
+      '<td>' + statusBadge + '</td>' +
+      '<td>' +
+        '<div class="action-group">' +
+          '<button class="btn btn-primary btn-sm" onclick="openEmployeeModal(\'' + escapeAttr(emp.nip) + '\')" title="Edit Data Pegawai" style="padding:4px 8px; font-size:12px;">✏️ Edit</button>' +
+          '<button class="btn btn-secondary btn-sm" onclick="openSingleGenModal(\'' + escapeAttr(emp.nip) + '\')" id="btn-gen-' + idx + '">⚡ Gen</button>' +
+          docBtn +
+          docxBtn +
+        '</div>' +
+      '</td>' +
+      '</tr>';
+
+    tbody.insertAdjacentHTML('beforeend', row);
+  });
+}
+
+// ─── STATUS BADGE ─────────────────────────────────────────────
+function getStatusBadge(status) {
+  switch((status || '').toUpperCase()) {
+    case 'SUCCESS': return '<span class="badge badge-success">✓ Selesai</span>';
+    case 'ERROR':   return '<span class="badge badge-error">✗ Error</span>';
+    case 'SKIPPED': return '<span class="badge badge-skip">↷ Skipped</span>';
+    default:        return '<span class="badge badge-none">— Belum</span>';
+  }
+}
+
+// ─── SEARCH ───────────────────────────────────────────────────
+function handleSearch(e) {
+  var q = e.target.value.trim().toLowerCase();
+
+  if (!q) {
+    state.filteredEmps = state.employees;
+    renderTable(state.filteredEmps);
+    return;
+  }
+
+  state.filteredEmps = state.employees.filter(function(emp) {
+    return (emp.nip && emp.nip.toLowerCase().indexOf(q) >= 0) ||
+           (emp.namaLengkap && emp.namaLengkap.toLowerCase().indexOf(q) >= 0);
+  });
+
+  renderTable(state.filteredEmps);
+}
+
+// ─── UPDATE PROCESS DATE ──────────────────────────────────────
+function updateProcessDate(dateStr) {
+  if (!dateStr) return;
+  showToast('Memperbarui tanggal proses...', 'info');
+
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (!res.success) { showToast(res.error, 'error'); return; }
+      state.year = res.year;
+      document.getElementById('year-badge').textContent = res.year;
+      showToast('Tanggal proses diperbarui: ' + res.processDate, 'success');
+      loadDashboard(res.year);
+    })
+    .withFailureHandler(function(err) { showToast('Gagal update tanggal: ' + err, 'error'); })
+    .apiUpdateProcessDate(dateStr);
+}
+
+// ─── SINGLE GENERATE MODAL ────────────────────────────────────
+function openSingleGenModal(nip) {
+  state.pendingGenNIP = nip;
+  document.getElementById('modal-title').textContent = 'Generate Dokumen';
+  document.getElementById('modal-desc').textContent  =
+    'Pilih mode generate untuk pegawai ini:';
+  document.getElementById('modal-overlay').classList.add('open');
+}
+
+// ─── GENERATE ALL MODAL ───────────────────────────────────────
+function openGenerateAllModal() {
+  state.pendingGenNIP = null;
+  document.getElementById('modal-title').textContent = 'Generate Semua Pegawai';
+  document.getElementById('modal-desc').textContent  =
+    'Pilih mode generate untuk ' + state.employees.length + ' pegawai:';
+  document.getElementById('modal-overlay').classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('open');
+  state.pendingGenNIP = null;
+}
+
+function confirmModal() {
+  var selectedMode = document.querySelector('input[name="gen-mode"]:checked');
+  var mode = selectedMode ? selectedMode.value : 'skip';
+  closeModal();
+
+  if (state.pendingGenNIP) {
+    // Generate satu pegawai
+    executeSingleGenerate(state.pendingGenNIP, mode);
+  } else {
+    // Generate semua
+    executeGenerateAll(mode);
+  }
+}
+
+// ─── SINGLE GENERATE ─────────────────────────────────────────
+function executeSingleGenerate(nip, mode) {
+  if (state.generating) { showToast('Proses generate sedang berjalan.', 'warning'); return; }
+
+  showToast('Memproses: ' + nip + '...', 'info');
+
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (!res.success) {
+        showToast('Error: ' + res.error, 'error');
+        addLogEntry('ERROR: ' + nip + ' — ' + res.error, 'error');
+      } else {
+        var msg = res.status === 'SKIPPED' ? 'Dokumen sudah ada (SKIP).' : 'Dokumen berhasil digenerate!';
+        showToast(msg, res.status === 'SKIPPED' ? 'info' : 'success');
+        addLogEntry((res.status === 'SKIPPED' ? 'SKIP' : 'OK') + ': ' + nip, res.status === 'SKIPPED' ? 'skip' : 'success');
+        
+        // Tampilkan modal hasil
+        document.getElementById('result-modal-title').textContent = 'Generate Sukses!';
+        document.getElementById('result-modal-desc').innerHTML = 'Dokumen untuk <b>' + escapeHtml(nip) + '</b> berhasil diproses.';
+        
+        var linksHtml = '';
+        if (res.docUrl) linksHtml += '<a href="' + res.docUrl + '" target="_blank" class="btn btn-blue" style="flex:1; text-align:center">📄 Buka Google Docs</a>';
+        if (res.docxUrl) linksHtml += '<a href="' + res.docxUrl + '" target="_blank" class="btn btn-success" style="flex:1; text-align:center">⬇ Download DOCX</a>';
+        
+        document.getElementById('result-modal-links').innerHTML = linksHtml;
+        document.getElementById('result-modal-overlay').classList.add('open');
+
+        // Reload row data
+        loadDashboard(state.year);
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast('Gagal: ' + err, 'error');
+      addLogEntry('ERROR: ' + nip, 'error');
+    })
+    .apiGenerateSingle(nip, mode);
+}
+
+// ─── GENERATE ALL (WORKER PATTERN) ──────────────────────────────
+var MAX_WORKERS = 5;
+
+function executeGenerateAll(mode) {
+  if (state.generating) { showToast('Proses generate sedang berjalan.', 'warning'); return; }
+
+  // Ambil semua NIP
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (!res.success) { showToast(res.error, 'error'); return; }
+      state.queue        = res.nips;
+      state.currentIndex = 0;
+      state.batchMode    = mode;
+      state.batchResults = { success: 0, error: 0, skip: 0 };
+      state.generating   = true;
+      state.cancelRequested = false;
+      state.activeWorkers = 0;
+
+      document.getElementById('btn-generate-all').style.display = 'none';
+      var btnCancel = document.getElementById('btn-cancel-all');
+      btnCancel.style.display = 'inline-flex';
+      btnCancel.disabled = false;
+      btnCancel.innerHTML = '🛑 Batalkan';
+
+      showProgressBar(true, 0, res.total);
+      clearLog();
+      addLogEntry('Mulai generate ' + res.total + ' pegawai dengan ' + MAX_WORKERS + ' concurrent workers (mode: ' + mode + ')...', 'info');
+
+      startWorkers();
+    })
+    .withFailureHandler(function(err) { showToast(err, 'error'); })
+    .apiGetAllNIPs(state.year);
+}
+
+function startWorkers() {
+  var numWorkers = Math.min(MAX_WORKERS, state.queue.length);
+  for (var i = 0; i < numWorkers; i++) {
+    state.activeWorkers++;
+    runWorker(i + 1);
+  }
+}
+
+function runWorker(workerId) {
+  if (state.cancelRequested) {
+    state.activeWorkers--;
+    if (state.activeWorkers === 0) {
+      addLogEntry('🛑 Proses dibatalkan oleh pengguna.', 'error');
+      finishGeneration();
+    }
+    return;
+  }
+
+  if (state.currentIndex >= state.queue.length) {
+    state.activeWorkers--;
+    if (state.activeWorkers === 0) {
+      finishGeneration();
+    }
+    return;
+  }
+
+  var index = state.currentIndex++;
+  var nip = state.queue[index];
+
+  updateProgress(state.currentIndex, state.queue.length);
+
+  var finished = false;
+  // Failsafe timeout: Jika server GAS tidak merespons dalam 45 detik, anggap timeout agar tidak hang
+  var timeoutTimer = setTimeout(function() {
+    if (finished) return;
+    finished = true;
+    state.batchResults.error++;
+    addLogEntry('ERR: ' + nip + ' — Request Timeout', 'error');
+    runWorker(workerId);
+  }, 45000);
+
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeoutTimer);
+
+      if (!res.success) {
+        state.batchResults.error++;
+        addLogEntry('ERR: ' + nip + ' — ' + res.error, 'error');
+      } else {
+        if (res.status === 'SUCCESS')  { state.batchResults.success++; addLogEntry('OK: ' + nip, 'success'); }
+        else if (res.status === 'SKIPPED') { state.batchResults.skip++;    addLogEntry('SKIP: ' + nip, 'skip'); }
+        else { state.batchResults.error++;   addLogEntry('ERR: ' + nip + ' — ' + res.error, 'error'); }
+      }
+      runWorker(workerId);
+    })
+    .withFailureHandler(function(err) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeoutTimer);
+
+      state.batchResults.error++;
+      addLogEntry('ERR: ' + nip + ' — ' + err, 'error');
+      runWorker(workerId);
+    })
+    .apiGenerateSingle(nip, state.batchMode);
+}
+
+function finishGeneration() {
+  state.generating = false;
+  state.cancelRequested = false;
+  document.getElementById('btn-generate-all').style.display = 'inline-flex';
+  document.getElementById('btn-generate-all').disabled = false;
+  document.getElementById('btn-cancel-all').style.display = 'none';
+
+  updateProgress(state.queue.length, state.queue.length);
+
+  var msg = 'Selesai! ✓ ' + state.batchResults.success +
+            ' berhasil, ✗ ' + state.batchResults.error +
+            ' error, ↷ ' + state.batchResults.skip + ' skip.';
+  addLogEntry(msg, 'info');
+  showToast(msg, state.batchResults.error > 0 ? 'warning' : 'success');
+
+  // Ambil URL folder dan tampilkan modal
+  google.script.run
+    .withSuccessHandler(function(folderUrl) {
+      document.getElementById('result-modal-title').textContent = 'Generate Massal Selesai!';
+      document.getElementById('result-modal-desc').innerHTML = msg;
+      
+      var linksHtml = '';
+      if (folderUrl) {
+        linksHtml = '<a href="' + folderUrl + '" target="_blank" class="btn btn-primary" style="width:100%; text-align:center; display:block">📂 Buka Folder Output di Google Drive</a>';
+      }
+      
+      document.getElementById('result-modal-links').innerHTML = linksHtml;
+      document.getElementById('result-modal-overlay').classList.add('open');
+      
+      // Reload dashboard
+      loadDashboard(state.year);
+    })
+    .withFailureHandler(function() { loadDashboard(state.year); })
+    .apiGetOutputFolderUrl(state.year);
+}
+
+// ─── PROGRESS BAR ─────────────────────────────────────────────
+function showProgressBar(visible, current, total) {
+  var el = document.getElementById('progress-container');
+  el.classList.toggle('visible', visible);
+  updateProgress(current, total);
+}
+
+function updateProgress(current, total) {
+  var pct = total > 0 ? Math.round((current / total) * 100) : 0;
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent  = 'Memproses...';
+  document.getElementById('progress-count').textContent = current + ' / ' + total + ' (' + pct + '%)';
+}
+
+// ─── LOG PANEL ────────────────────────────────────────────────
+function addLogEntry(text, type) {
+  var panel = document.getElementById('log-panel');
+  var entry = document.createElement('div');
+  entry.className = 'log-entry ' + (type || 'info');
+  entry.textContent = '[' + new Date().toLocaleTimeString('id-ID') + '] ' + text;
+  panel.appendChild(entry);
+  panel.scrollTop = panel.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log-panel').innerHTML = '';
+}
+
+// ─── LOADING OVERLAY ──────────────────────────────────────────
+function showLoadingOverlay(visible) {
+  document.getElementById('loading-overlay').classList.toggle('visible', visible);
+}
+
+// ─── TOAST ────────────────────────────────────────────────────
+function showToast(message, type) {
+  type = type || 'info';
+  var icons = { success: '✓', error: '✗', info: 'ℹ', warning: '⚠' };
+  var container = document.getElementById('toast-container');
+
+  var toast = document.createElement('div');
+  toast.className = 'toast ' + type;
+  toast.innerHTML = '<span>' + (icons[type] || '•') + '</span><span>' + escapeHtml(message) + '</span>';
+  container.appendChild(toast);
+
+  setTimeout(function() {
+    toast.style.opacity    = '0';
+    toast.style.transform  = 'translateY(8px)';
+    toast.style.transition = 'all 0.3s';
+    setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
+  }, 4000);
+}
+
+// ─── HELPERS ──────────────────────────────────────────────────
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.toString()
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+function escapeAttr(str) {
+  if (!str) return '';
+  return str.toString().replace(/'/g, "\\'");
+}
+
+function debounce(fn, delay) {
+  var timer;
+  return function() {
+    var args = arguments;
+    var ctx  = this;
+    clearTimeout(timer);
+    timer = setTimeout(function() { fn.apply(ctx, args); }, delay);
+  };
+}
+// ─── EMPLOYEE FORM MODAL ──────────────────────────────────────
+function openEmployeeModal(nip) {
+  // reset form
+  document.getElementById('employee-form').reset();
+  document.getElementById('anak-list').innerHTML = '';
+  switchTab(document.querySelector('.tab-btn'), 'tab-pegawai');
+
+  if (nip) {
+    document.getElementById('employee-modal-title').textContent = 'Edit Pegawai';
+    var emp = state.employees.find(function(e) { return e.nip === nip; });
+    if (emp) populateEmployeeForm(emp);
+  } else {
+    document.getElementById('employee-modal-title').textContent = 'Tambah Pegawai Baru';
+    addAnakField(); // Default 1 anak kosong
+  }
+  document.getElementById('employee-modal-overlay').classList.add('open');
+}
+
+function closeEmployeeModal() {
+  document.getElementById('employee-modal-overlay').classList.remove('open');
+}
+
+function switchTab(btnElem, tabId) {
+  var tabs = document.querySelectorAll('.tab-content');
+  for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
+  
+  var btns = document.querySelectorAll('.tab-btn');
+  for (var i = 0; i < btns.length; i++) btns[i].classList.remove('active');
+  
+  document.getElementById(tabId).classList.add('active');
+  if (btnElem) btnElem.classList.add('active');
+}
+
+function addAnakField(data) {
+  var container = document.getElementById('anak-list');
+  var count = container.children.length + 1;
+  if (count > 6) {
+    showToast('Maksimal 6 anak sesuai format KP4.', 'warning');
+    return;
+  }
+  
+  data = data || { nama:'', status:'', tglLahir:'', statusKawin:'', sekolah:'', namaAyah:'', namaIbu:'' };
+  
+  var html = '<div class="anak-item" style="border:1px solid var(--border); padding:10px; border-radius:5px; position:relative;">' +
+    '<h4 style="margin:0 0 10px 0; font-size:13px; color:var(--gold);">Anak ke-' + count + '</h4>' +
+    '<div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">' +
+      '<div><label class="form-label">Nama Anak</label><input type="text" class="form-input anak-nama" value="'+escapeAttr(data.nama)+'"></div>' +
+      '<div><label class="form-label">Status (AK/AT/AA)</label><input type="text" class="form-input anak-status" value="'+escapeAttr(data.status)+'"></div>' +
+      '<div><label class="form-label">Tgl Lahir (DD/MM/YYYY)</label><input type="text" class="form-input anak-tglLahir" value="'+escapeAttr(data.tglLahir)+'"></div>' +
+      '<div><label class="form-label">Status Kawin</label><input type="text" class="form-input anak-statusKawin" value="'+escapeAttr(data.statusKawin)+'"></div>' +
+      '<div style="grid-column: span 2;"><label class="form-label">Sekolah/Kuliah</label><input type="text" class="form-input anak-sekolah" value="'+escapeAttr(data.sekolah)+'"></div>' +
+      (count <= 2 ? 
+        '<div><label class="form-label">Nama Ayah</label><input type="text" class="form-input anak-ayah" value="'+escapeAttr(data.namaAyah)+'"></div>' +
+        '<div><label class="form-label">Nama Ibu</label><input type="text" class="form-input anak-ibu" value="'+escapeAttr(data.namaIbu)+'"></div>' 
+      : '') +
+    '</div>' +
+    '<button type="button" onclick="this.parentElement.remove()" style="position:absolute; top:10px; right:10px; background:transparent; border:none; color:var(--red); cursor:pointer;">❌</button>' +
+  '</div>';
+  
+  container.insertAdjacentHTML('beforeend', html);
+}
+
+function populateEmployeeForm(emp) {
+  var setVal = function(id, val) { document.getElementById(id).value = val || ''; };
+  
+  setVal('emp-nip', emp.nip);
+  setVal('emp-namaLengkap', emp.namaLengkap);
+  setVal('emp-tempatTglLahir', emp.tempatTglLahir);
+  setVal('emp-jenisKelamin', emp.jenisKelamin);
+  setVal('emp-agama', emp.agama);
+  setVal('emp-kebangsaan', emp.kebangsaan);
+  setVal('emp-pangkatGol', emp.pangkatGol);
+  setVal('emp-jabatan', emp.jabatan);
+  setVal('emp-instansi', emp.instansi);
+  setVal('emp-masaKerja', emp.masaKerja);
+  setVal('emp-digajiMenurut', emp.digajiMenurut);
+  setVal('emp-alamat', emp.alamat);
+  setVal('emp-jabatanSampingan', emp.jabatanSampingan);
+  setVal('emp-penghasilanSampingan', emp.penghasilanSampingan);
+  setVal('emp-pensiunJanda', emp.pensiunJanda);
+  
+  if (emp.pasangan) {
+    setVal('pas-nama', emp.pasangan.nama);
+    setVal('pas-tglLahir', emp.pasangan.tglLahirRaw);
+    setVal('pas-tglPerkawinan', emp.pasangan.tglPerkawinanRaw);
+    setVal('pas-pekerjaan', emp.pasangan.pekerjaan);
+    setVal('pas-penghasilan', emp.pasangan.penghasilan);
+    setVal('pas-keterangan', emp.pasangan.keterangan);
+  }
+  
+  if (emp.anak && emp.anak.length > 0) {
+    emp.anak.forEach(function(a) {
+      if (a.exists) addAnakField({
+        nama: a.nama, status: a.status, tglLahir: a.tglLahirRaw, statusKawin: a.statusKawin, sekolah: a.sekolah, namaAyah: a.namaAyah, namaIbu: a.namaIbu
+      });
+    });
+  } else {
+    addAnakField();
+  }
+}
+
+function submitEmployeeForm() {
+  var getVal = function(id) { return document.getElementById(id).value; };
+  
+  var payload = {
+    nip: getVal('emp-nip'),
+    namaLengkap: getVal('emp-namaLengkap'),
+    tempatTglLahir: getVal('emp-tempatTglLahir'),
+    jenisKelamin: getVal('emp-jenisKelamin'),
+    agama: getVal('emp-agama'),
+    kebangsaan: getVal('emp-kebangsaan'),
+    pangkatGol: getVal('emp-pangkatGol'),
+    jabatan: getVal('emp-jabatan'),
+    instansi: getVal('emp-instansi'),
+    masaKerja: getVal('emp-masaKerja'),
+    digajiMenurut: getVal('emp-digajiMenurut'),
+    alamat: getVal('emp-alamat'),
+    jabatanSampingan: getVal('emp-jabatanSampingan'),
+    penghasilanSampingan: getVal('emp-penghasilanSampingan'),
+    pensiunJanda: getVal('emp-pensiunJanda'),
+    
+    namaPasangan: getVal('pas-nama'),
+    tglLahirPasangan: getVal('pas-tglLahir'),
+    tglPerkawinan: getVal('pas-tglPerkawinan'),
+    pekerjaanPasangan: getVal('pas-pekerjaan'),
+    penghasilanPasangan: getVal('pas-penghasilan'),
+    keteranganPasangan: getVal('pas-keterangan'),
+    
+    anak: []
+  };
+  
+  var anakItems = document.querySelectorAll('.anak-item');
+  for (var i = 0; i < anakItems.length; i++) {
+    var item = anakItems[i];
+    var ayahEl = item.querySelector('.anak-ayah');
+    var ibuEl = item.querySelector('.anak-ibu');
+    payload.anak.push({
+      nama: item.querySelector('.anak-nama').value,
+      status: item.querySelector('.anak-status').value,
+      tglLahir: item.querySelector('.anak-tglLahir').value,
+      statusKawin: item.querySelector('.anak-statusKawin').value,
+      sekolah: item.querySelector('.anak-sekolah').value,
+      namaAyah: ayahEl ? ayahEl.value : '',
+      namaIbu: ibuEl ? ibuEl.value : ''
+    });
+  }
+  
+  var btn = document.getElementById('btn-save-employee');
+  btn.disabled = true;
+  btn.textContent = 'Menyimpan...';
+  
+  google.script.run
+    .withSuccessHandler(function(res) {
+      btn.disabled = false;
+      btn.textContent = '💾 Simpan Data';
+      if (res.success) {
+        showToast('Data ' + res.nip + ' berhasil disimpan!', 'success');
+        closeEmployeeModal();
+        loadDashboard(state.year); // Reload data dari spreadsheet
+      } else {
+        showToast('Gagal: ' + res.error, 'error');
+      }
+    })
+    .withFailureHandler(function(err) {
+      btn.disabled = false;
+      btn.textContent = '💾 Simpan Data';
+      showToast('Error: ' + err, 'error');
+    })
+    .apiSaveEmployee(payload);
+}
+</script>

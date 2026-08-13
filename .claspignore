@@ -1,0 +1,10 @@
+**/*.xlsx
+**/*.docx
+**/*.py
+**/*.md
+**/*.log
+docs/**
+src/**
+web/**
+tests/**
+.clasp.json

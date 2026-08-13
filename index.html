@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sistem Tunjangan Keluarga — KP4</title>
+  <meta name="description" content="Sistem Otomatisasi Surat Keterangan Untuk Mendapatkan Pembayaran Tunjangan Keluarga — Dinas Kehutanan Provinsi Lampung">
+  <?!= include('css'); ?>
+</head>
+<body>
+
+<!-- ─── LOADING OVERLAY ───────────────────────────────────────── -->
+<div class="loading-overlay" id="loading-overlay">
+  <div class="spinner" style="width:36px;height:36px;border-width:3px;border-top-color:var(--gold);"></div>
+  <div class="loading-text">Memuat data...</div>
+</div>
+
+<!-- ─── MODAL OVERLAY ────────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-overlay" role="dialog" aria-modal="true">
+  <div class="modal">
+    <div class="modal-title" id="modal-title">Generate Dokumen</div>
+    <div class="modal-desc"  id="modal-desc">Pilih mode generate:</div>
+
+    <div class="modal-options">
+      <label class="modal-option">
+        <input type="radio" name="gen-mode" value="skip" checked id="mode-skip">
+        <div>
+          <div class="modal-option-label">↷ Skip jika sudah ada</div>
+          <div class="modal-option-desc">Lewati pegawai yang dokumennya sudah digenerate. (Default)</div>
+        </div>
+      </label>
+      <label class="modal-option">
+        <input type="radio" name="gen-mode" value="replace" id="mode-replace">
+        <div>
+          <div class="modal-option-label">↺ Replace dokumen lama</div>
+          <div class="modal-option-desc">Hapus dan buat ulang dokumen yang sudah ada.</div>
+        </div>
+      </label>
+      <label class="modal-option">
+        <input type="radio" name="gen-mode" value="regenerate" id="mode-regen">
+        <div>
+          <div class="modal-option-label">⟳ Generate semua (paksa)</div>
+          <div class="modal-option-desc">Buat ulang semua dokumen tanpa terkecuali.</div>
+        </div>
+      </label>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="btn-modal-cancel">Batal</button>
+      <button class="btn btn-primary"   id="btn-modal-confirm">⚡ Konfirmasi</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── TOAST CONTAINER ───────────────────────────────────────── -->
+<div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+<!-- ─── APP HEADER ───────────────────────────────────────────── -->
+<header class="app-header" role="banner">
+  <div class="header-inner">
+    <div class="header-brand">
+      <div class="brand-icon" aria-hidden="true">🌳</div>
+      <div>
+        <div class="brand-title">Sistem Tunjangan Keluarga</div>
+        <span class="brand-subtitle">Dinas Kehutanan Provinsi Lampung — Surat KP4</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span class="year-badge" id="year-badge">—</span>
+    </div>
+  </div>
+</header>
+
+<!-- ─── MAIN CONTENT ─────────────────────────────────────────── -->
+<main class="app-main" role="main">
+
+  <!-- CONFIG PANEL -->
+  <section class="section" aria-label="Konfigurasi">
+    <div class="section-title">⚙ Konfigurasi Proses</div>
+    <div class="config-panel">
+      <div class="config-item">
+        <label class="config-label" for="process-date-input">Tanggal Proses</label>
+        <input type="date"
+               id="process-date-input"
+               class="config-input"
+               title="Format: YYYY-MM-DD"
+               aria-label="Tanggal Proses">
+      </div>
+      <div class="config-divider" aria-hidden="true"></div>
+      <div class="config-item">
+        <span class="config-label">Tahun Aktif</span>
+        <span class="year-badge" id="year-badge-2" style="min-width:80px;">—</span>
+      </div>
+      <div class="config-divider" aria-hidden="true"></div>
+      <div class="config-item" style="margin-left:auto;">
+        <button class="btn btn-secondary" onclick="loadDashboard(state.year)" id="btn-refresh" aria-label="Refresh data">
+          🔄 Refresh
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- STATS -->
+  <section class="section" aria-label="Statistik">
+    <div class="section-title">📊 Statistik Generate</div>
+    <div class="stats-grid" role="list">
+      <div class="stat-card total" role="listitem">
+        <div class="stat-value" id="stat-total">—</div>
+        <div class="stat-label">Total Pegawai</div>
+      </div>
+      <div class="stat-card success" role="listitem">
+        <div class="stat-value" id="stat-success">—</div>
+        <div class="stat-label">Berhasil</div>
+      </div>
+      <div class="stat-card error" role="listitem">
+        <div class="stat-value" id="stat-error">—</div>
+        <div class="stat-label">Error</div>
+      </div>
+      <div class="stat-card pending" role="listitem">
+        <div class="stat-value" id="stat-pending">—</div>
+        <div class="stat-label">Belum / Skip</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- TOOLBAR -->
+  <section class="section" aria-label="Alat">
+    <div class="toolbar">
+      <div class="search-box">
+        <span class="search-icon" aria-hidden="true">🔍</span>
+        <input type="search"
+               id="search-input"
+               class="search-input"
+               placeholder="Cari NIP atau Nama..."
+               aria-label="Cari pegawai berdasarkan NIP atau nama">
+      </div>
+      <button class="btn btn-primary" id="btn-generate-all" aria-label="Generate semua pegawai">
+        ⚡ Generate Semua
+      </button>
+    </div>
+  </section>
+
+  <!-- PROGRESS BAR -->
+  <div class="progress-container" id="progress-container" role="progressbar" aria-label="Progress generate">
+    <div class="progress-header">
+      <span class="progress-text" id="progress-text">Memproses...</span>
+      <span class="progress-count" id="progress-count">0 / 0 (0%)</span>
+    </div>
+    <div class="progress-bar-wrap">
+      <div class="progress-bar-fill" id="progress-fill"></div>
+    </div>
+  </div>
+
+  <!-- LOG PANEL (visible saat generate) -->
+  <div id="log-container" style="margin-bottom:16px;display:none;">
+    <div class="section-title">📝 Log Proses</div>
+    <div class="log-panel" id="log-panel" role="log" aria-live="polite" aria-label="Log proses generate"></div>
+  </div>
+
+  <!-- DATA TABLE -->
+  <section class="section" aria-label="Daftar pegawai">
+    <div class="flex items-center gap-2" style="margin-bottom:12px;">
+      <div class="section-title" style="margin-bottom:0;">📋 Daftar Pegawai</div>
+      <span class="text-muted" style="font-size:11px;" id="table-count"></span>
+    </div>
+    <div class="table-wrapper">
+      <table class="data-table" id="data-table" aria-label="Tabel daftar pegawai">
+        <thead>
+          <tr>
+            <th>No</th>
+            <th>NIP</th>
+            <th>Nama Lengkap</th>
+            <th class="td-jabatan">Jabatan</th>
+            <th>Anak Eligible</th>
+            <th>Status</th>
+            <th>Aksi</th>
+          </tr>
+        </thead>
+        <tbody id="table-body">
+          <tr>
+            <td colspan="7">
+              <div class="empty-state">
+                <div class="empty-state-icon">⏳</div>
+                <div class="empty-state-text">Memuat data...</div>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<?!= include('javascript'); ?>
+
+<script>
+// Sync year badge dan log container visibility
+(function() {
+  // Show log container when generating starts
+  var origShowProg = showProgressBar;
+  window.showProgressBar = function(visible, current, total) {
+    document.getElementById('log-container').style.display = visible ? 'block' : 'none';
+    origShowProg(visible, current, total);
+  };
+
+  // Sync second year badge
+  var observer = new MutationObserver(function() {
+    var val = document.getElementById('year-badge').textContent;
+    document.getElementById('year-badge-2').textContent = val;
+    document.getElementById('table-count').textContent =
+      state.filteredEmps ? '(' + state.filteredEmps.length + ' pegawai)' : '';
+  });
+  observer.observe(document.getElementById('year-badge'), { childList: true });
+
+  // Process date input: convert ISO date to DD/MM/YYYY for API
+  var dateInput = document.getElementById('process-date-input');
+  dateInput.addEventListener('change', function() {
+    var val = this.value; // YYYY-MM-DD
+    if (!val) return;
+    var parts = val.split('-');
+    if (parts.length === 3) {
+      var formatted = parts[2] + '/' + parts[1] + '/' + parts[0];
+      updateProcessDate(formatted);
+    }
+  });
+
+  // Observe render untuk update count
+  var origRender = window.renderTable;
+  window.renderTable = function(employees) {
+    origRender(employees);
+    document.getElementById('table-count').textContent =
+      employees ? '(' + employees.length + ' pegawai)' : '';
+  };
+})();
+</script>
+
+</body>
+</html>
