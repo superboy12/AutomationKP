@@ -90,24 +90,24 @@ function initConfigSheet() {
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG_SHEET_NAME);
     logMsg('INFO', 'Sheet CONFIG dibuat baru.');
+
+    var rows = [
+      ['Tanggal Proses', '31/12/2026'],
+      ['Tahun',          '2026'],
+      ['Template Google Docs ID', ''],
+      ['Folder Output Google Drive ID', '']
+    ];
+
+    sheet.clearContents();
+    sheet.getRange(1, 1, rows.length, 2).setValues(rows);
+
+    // Format header kolom A (bold)
+    sheet.getRange(1, 1, rows.length, 1).setFontWeight('bold');
+    sheet.setColumnWidth(1, 250);
+    sheet.setColumnWidth(2, 400);
+
+    logMsg('INFO', 'CONFIG sheet diinisialisasi.');
   }
-
-  var rows = [
-    ['Tanggal Proses', '31/12/2026'],
-    ['Tahun',          '2026'],
-    ['Template Google Docs ID', ''],
-    ['Folder Output Google Drive ID', '']
-  ];
-
-  sheet.clearContents();
-  sheet.getRange(1, 1, rows.length, 2).setValues(rows);
-
-  // Format header kolom A (bold)
-  sheet.getRange(1, 1, rows.length, 1).setFontWeight('bold');
-  sheet.setColumnWidth(1, 250);
-  sheet.setColumnWidth(2, 400);
-
-  logMsg('INFO', 'CONFIG sheet diinisialisasi.');
 }
 
 /**

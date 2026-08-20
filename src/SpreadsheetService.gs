@@ -128,7 +128,7 @@ function getEmployeeByNIP(nip) {
   var employees = getAllEmployees();
   var nipNorm   = nip.toString().trim().replace(/\s+/g, '');
   return employees.find(function(e) {
-    return e.nip.toString().replace(/\s+/g, '') === nipNorm;
+    return e.employee.nip.toString().replace(/\s+/g, '') === nipNorm;
   }) || null;
 }
 
@@ -142,8 +142,8 @@ function searchEmployees(query) {
   var employees = getAllEmployees();
   var q = query.toString().toLowerCase().trim();
   return employees.filter(function(e) {
-    return (e.nip && e.nip.toLowerCase().indexOf(q) >= 0) ||
-           (e.namaLengkap && e.namaLengkap.toLowerCase().indexOf(q) >= 0);
+    return (e.employee.nip && e.employee.nip.toLowerCase().indexOf(q) >= 0) ||
+           (e.employee.namaLengkap && e.employee.namaLengkap.toLowerCase().indexOf(q) >= 0);
   });
 }
 
